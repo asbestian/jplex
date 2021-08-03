@@ -1,616 +1,427 @@
 package de.asbestian.jplex.input;
 
+import de.asbestian.jplex.input.Constraint.ConstraintBuilder;
+import de.asbestian.jplex.input.Constraint.ConstraintSense;
+import de.asbestian.jplex.input.Objective.OBJECTIVE_SENSE;
+import de.asbestian.jplex.input.Variable.VariableBuilder;
 import java.io.BufferedReader;
-import java.io.FileNotFoundException;
 import java.io.FileReader;
 import java.io.IOException;
-import java.text.ParseException;
-import java.util.HashMap;
-import java.util.Iterator;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.StringTokenizer;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+import org.eclipse.collections.api.list.ImmutableList;
+import org.eclipse.collections.api.list.MutableList;
+import org.eclipse.collections.api.map.ImmutableMap;
+import org.eclipse.collections.api.map.MutableMap;
+import org.eclipse.collections.impl.list.mutable.ArrayListAdapter;
+import org.eclipse.collections.impl.list.mutable.FastList;
+import org.eclipse.collections.impl.map.immutable.ImmutableUnifiedMap;
+import org.eclipse.collections.impl.map.mutable.UnifiedMap;
+import org.javatuples.Pair;
+import org.javatuples.Triplet;
+import org.javatuples.Tuple;
+import org.javatuples.Unit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * A class to read input files in lp format.
+ * This class is responsible for reading input files given in lp format.
+ * Note that the parser cannot yet handle integer and binary variables.
  *
- * <p>Initialise with the file name and invoke the method <code>readLP()</code> to parse an lp from
- * an <code>.lp</code> file. After successful reading all data is held in various arrays which can
- * be accessed via class methods. Debug output can be switched on by an additional parameter to the
- * constructor. <br>
- * Note that the parser cannot yet handle integer and binary variables!
- */
+ * @author Sebastian Schenker */
 public class LpFileReader {
 
   private static final Logger LOGGER = LoggerFactory.getLogger(LpFileReader.class);
 
-  private final String filename;
+  private enum Section {
+    START,
+    OBJECTIVE,
+    CONSTRAINTS,
+    BOUNDS,
+    END
+  }
 
-  final int SEC_START = 0;
-  final int SEC_OBJECTIVE = 1;
-  final int SEC_CONSTRAINTS = 2;
-  final int SEC_BOUNDS = 3;
-  final int SEC_END = 4;
+  private enum Sign {
+    MINUS(-1),
+    PLUS(1),
+    UNDEF(0);
 
-  /** represents <= */
-  public static final int SENSE_LEQ = -1;
-  /** represents = */
-  public static final int SENSE_EQ = 0;
-  /** represents >= */
-  public static final int SENSE_GEQ = 1;
-  /** represents an undefined sense */
-  public static final int SENSE_UNDEF = -17;
-  /** represents minimising the objective */
-  public static final int SENSE_MIN = -2;
-  /** represents maximising the objective */
-  public static final int SENSE_MAX = 2;
+    Sign(final int value) {
+      this.value = value;
+    }
 
-  final String VARNAME_PATTERN =
+    final int value;
+  }
+
+  private static final String PATTERN =
       "[a-zA-Z\\!\"#\\$%&\\(\\)/,;\\?`'\\{\\}\\|~_][a-zA-Z0-9\\!\"#\\$%&\\(\\)/,\\.;\\?`'\\{\\}\\|~_]*";
 
-  Constraint objRaw;
-  HashMap constrHash;
-  HashMap varHash;
+  private Objective objective;
+  private ImmutableList<Constraint> constraints;
+  private ImmutableMap<String, Variable> variables;
+  private Section currentSection;
+  private int currentLine;
 
-  double[][] constraint;
-  int[] sense;
-  double[] rhs;
-  String[] constrName;
-  double[] obj;
-  int objsense;
-  double[] lbound;
-  double[] ubound;
-  String[] varName;
-
-  protected class Constraint {
-    public String name;
-    public int no;
-    public HashMap coeff;
-    public int sense;
-    public double rhs;
-
-    public Constraint(String n, int i) {
-      name = n;
-      no = i;
-      coeff = new HashMap();
-      sense = SENSE_UNDEF;
-      rhs = 0;
-      LOGGER.trace(String.format("new Constraint %s (no %d)", name, i));
-    }
-  }
-
-  protected class Variable {
-    public String name;
-    public int no;
-    public double lb;
-    public double ub;
-
-    public Variable(String n, int i) {
-      name = n;
-      no = i;
-      lb = 0;
-      ub = Double.POSITIVE_INFINITY;
-      LOGGER.trace(String.format("new Variable %s (no %d)", name, i));
-    }
-  }
-
-  protected class Coefficient {
-    public int varNo;
-    public int constrNo;
-    public double value;
-
-    public Coefficient(int var, int constr, double val) {
-      varNo = var;
-      constrNo = constr;
-      value = val;
-    }
-  }
-
-  /**
-   * Initialises the parser.
-   *
-   * @param file file path (including name) to read from
-   */
-  public LpFileReader(String file) {
-    filename = file;
-
-    constraint = new double[0][0];
-    sense = new int[0];
-    rhs = new double[0];
-    constrName = new String[0];
-    obj = new double[0];
-    objsense = SENSE_UNDEF;
-    lbound = new double[0];
-    ubound = new double[0];
-    varName = new String[0];
-  }
-
-  /**
-   * Tells the number of variables.
-   *
-   * @return the number of variables of the linear program read
-   */
-  public int noOfVariables() {
-    return varName.length;
-  }
-
-  /**
-   * Tells the number of constraints.
-   *
-   * @return the number of constraints of the linear program read
-   */
-  public int noOfConstraints() {
-    return constrName.length;
-  }
-
-  /**
-   * Tells the constraints coefficient matrix.
-   *
-   * @return the lhs coefficients of all constraints as an array of size <code>noOfConstraints()
-   *     </code> &times; <code>noOfVariables()</code>
-   */
-  public double[][] constraintsMatrix() {
-    return constraint;
-  }
-
-  /**
-   * Tells the senses of the constraints.
-   *
-   * @return the senses of the constraints as an array of size <code>noOfConstraints()</code>
-   */
-  public int[] senseVector() {
-    return sense;
-  }
-
-  /**
-   * Tells the right hand side coefficients of the constraints.
-   *
-   * @return the rhs of the constraints as an array of size <code>noOfConstraints()</code>
-   */
-  public double[] rhsVector() {
-    return rhs;
-  }
-
-  /**
-   * Tells the names of the constraints.
-   *
-   * @return the names of the constraints as an array of size <code>noOfConstraints()</code>
-   */
-  public String constraintName(int i) {
-    return constrName[i];
-  }
-
-  /**
-   * Tells the coefficients of the objective.
-   *
-   * @return the coefficients of the objective as an array of size <code>noOfVariables()</code>
-   */
-  public double[] objectiveVector() {
-    return obj;
-  }
-
-  /**
-   * Tells whether the objective is to be maximised or minimised.
-   *
-   * @return <code>SENSE_MAX</code> of <code>SENSE_MIN</code>
-   */
-  public int objectiveSense() {
-    return objsense;
-  }
-
-  /**
-   * Tells the lower bounds of the variables.
-   *
-   * @return the lower bounds of the variables as an array of size <code>noOfVariables()</code>
-   */
-  public double[] lowerBoundVector() {
-    return lbound;
-  }
-
-  /**
-   * Tells the upper bounds of the variables.
-   *
-   * @return the upper bounds of the variables as an array of size <code>noOfVariables()</code>
-   */
-  public double[] upperBoundVector() {
-    return ubound;
-  }
-
-  /**
-   * Tells the names of the variables.
-   *
-   * @return the names of the variables as an array of size <code>noOfVariables()</code>
-   */
-  public String variableName(int j) {
-    return varName[j];
-  }
-
-  /** Attempts to read a linear program from the file with which the parser was initialised. */
-  public void readLP() throws ParseException, FileNotFoundException, IOException {
-    BufferedReader in = new BufferedReader(new FileReader(filename));
-
-    constrHash = new HashMap();
-    varHash = new HashMap();
-    LOGGER.trace("switching to status SEC_START");
-    int status = SEC_START;
-    Constraint curConstr = null;
-    int constrNo = 0;
-    int lineNo = 0;
-    boolean constrComplete = true;
-    while ((in.ready()) && (status != SEC_END)) {
-      String line = in.readLine();
-      ++lineNo;
-      LOGGER.debug(String.format("line %d: %s", lineNo, line));
-      int commentStart = line.indexOf('\\');
-      if (commentStart != -1) {
-        line = line.substring(0, commentStart);
+  public LpFileReader(final String path) {
+    currentSection = Section.START;
+    currentLine = 0;
+    final MutableMap<String, VariableBuilder> variableBuilders = new UnifiedMap<>();
+    try (final BufferedReader bf = new BufferedReader(new FileReader(path))) {
+      objective = readObjective(bf, variableBuilders);
+      constraints = readConstraints(bf, variableBuilders);
+      if (currentSection == Section.BOUNDS) {
+        readBounds(bf, variableBuilders);
       }
-      line = line.trim();
+      variables = variableBuilders.collectValues((key, value) -> value.build()).toImmutable();
+    } catch (final IOException | InputException e) {
+      LOGGER.error("Problem reading section {} in input file {}", currentSection, path);
+      LOGGER.error(e.getMessage());
+      objective = new Objective("", OBJECTIVE_SENSE.UNDEF, new ImmutableUnifiedMap<>(
+          Collections.emptyMap()));
+      constraints = new FastList<Constraint>().toImmutable();
+      variables = new ImmutableUnifiedMap<>(Collections.emptyMap());
+    }
+  }
 
-      int colonIndex = line.indexOf(':');
-      if (colonIndex >= 0) {
-        LOGGER.trace("parsing name");
-        String namePart = line.substring(0, colonIndex).trim();
-        switch (status) {
-          case SEC_START:
-            throw new ParseException(
-                "line " + lineNo + ": unexpected ':' before objective section", lineNo);
-          case SEC_OBJECTIVE:
-            {
-              if (!namePart.matches(VARNAME_PATTERN)) {
-                throw new ParseException(
-                    "line " + lineNo + ": invalid objective name '" + namePart + "'", lineNo);
-              }
-              LOGGER.trace(String.format("setting objective name %s", namePart));
-              curConstr.name = namePart;
-            }
-            break;
-          case SEC_CONSTRAINTS:
-            {
-              if (!namePart.matches(VARNAME_PATTERN)) {
-                throw new ParseException(
-                    "line " + lineNo + ": invalid constraint name '" + namePart + "'", lineNo);
-              }
-              LOGGER.trace(String.format("setting constraint name %s", namePart));
-              curConstr.name = namePart;
-            }
-            break;
-          case SEC_BOUNDS:
-            throw new ParseException(
-                "line " + lineNo + ": unexpected ':' in bounds section", lineNo);
-        }
+  public Objective getObjective() {
+    return objective;
+  }
+
+  public int getNumberOfVariables() {
+    return variables.size();
+  }
+
+  public int getNumberOfConstraints() {
+    return constraints.size();
+  }
+
+  private Objective readObjective(
+      final BufferedReader bufferedReader,
+      final MutableMap<String, VariableBuilder> variableBuilders)
+      throws IOException, InputException {
+    if (currentSection != Section.START) {
+      throw new InputException(String.format("Expected Section.START, found %s.", currentSection));
+    }
+    OBJECTIVE_SENSE sense = null;
+    // read optimisation direction
+    var optDirectionRead = false;
+    while (!optDirectionRead) {
+      final var line = getTrimmedLine(bufferedReader);
+      if (line.isBlank()) {
+        continue;
+      }
+      LOGGER.debug("Switching to section {}.", Section.OBJECTIVE);
+      currentSection = Section.OBJECTIVE;
+      if (line.equalsIgnoreCase("max") || line.equalsIgnoreCase("maximize")
+          || line.equalsIgnoreCase("maximise")) {
+        LOGGER.debug("Found maximisation direction.");
+        sense = OBJECTIVE_SENSE.MAX;
+      } else if (line.equalsIgnoreCase("min")
+          || line.equalsIgnoreCase("minimize")
+           || line.equalsIgnoreCase("minimise")) {
+        LOGGER.debug("Found minimisation direction.");
+        sense = OBJECTIVE_SENSE.MIN;
+      } else {
+        throw new InputException(
+            String.format("Line %d: unrecognised optimisation direction %s.", currentLine, line));
+      }
+      optDirectionRead = true;
+    }
+    // read objective name and objective expression
+    String objName = "";
+    final MutableMap<String, Double> coefficients = new UnifiedMap<>();
+    while (true) {
+      var line = getTrimmedLine(bufferedReader);
+      final int colonIndex = line.indexOf(':');
+      if (line.equalsIgnoreCase("subject to")
+          || line.equalsIgnoreCase("such that")
+          || line.equalsIgnoreCase("s.t.")
+          || line.equalsIgnoreCase("st.")
+          || line.equalsIgnoreCase("st")) {
+        LOGGER.debug("Switching to section {}.", Section.CONSTRAINTS);
+        currentSection = Section.CONSTRAINTS;
+        break;
+      } else if (colonIndex != -1) { // parsing objective name
+        objName = getName(line, 0, colonIndex, currentLine);
+        LOGGER.trace("Found objective name: {}.", objName);
         line = line.substring(colonIndex + 1).trim();
       }
+      // parse objective expression
+      LOGGER.trace("Parsing line {}: {}", currentLine, line);
+      final var linComb = parseLinComb(variableBuilders, line, currentLine);
+      linComb.forEachKeyValue((key, value) -> coefficients.merge(key, value, Double::sum));
+    }
+    return new Objective(objName, sense, coefficients.toImmutable());
+  }
 
-      if (line.length() > 0) {
-        String keyword = line.toLowerCase();
-        if (keyword.equals("end")) {
-          if (constrComplete) {
-            LOGGER.trace("switching to status SEC_END");
-            status = SEC_END;
-          } else {
-            throw new ParseException("line " + lineNo + ": incomplete constraint", lineNo);
-          }
-        } else {
-          switch (status) {
-            case SEC_START:
-              {
-                curConstr = new Constraint("obj", 0);
-                if (keyword.equals("max")
-                    || keyword.equals("maximize")
-                    || keyword.equals("maximise")) {
-                  LOGGER.trace("recognised a maximising problem");
-                  curConstr.sense = SENSE_MAX;
-                } else if (keyword.equals("min")
-                    || keyword.equals("minimize")
-                    || keyword.equals("minimise")) {
-                  LOGGER.trace("recognised a minimising problem");
-                  curConstr.sense = SENSE_MIN;
-                } else {
-                  throw new ParseException(
-                      "line " + lineNo + ": unrecognised keyword '" + keyword + "'", lineNo);
-                }
-                LOGGER.trace("switching to status SEC_OBJECTIVE");
-                status = SEC_OBJECTIVE;
-              }
-              break;
-            case SEC_OBJECTIVE:
-              {
-                if (keyword.equals("subject to")
-                    || keyword.equals("such that")
-                    || keyword.equals("s.t.")
-                    || keyword.equals("st.")
-                    || keyword.equals("st")) {
-                  LOGGER.debug("saving objective");
-                  objRaw = curConstr;
-                  LOGGER.trace("switching to status SEC_CONSTRAINTS");
-                  status = SEC_CONSTRAINTS;
-                  LOGGER.trace("initialising new Constraint");
-                  curConstr = new Constraint("c" + constrNo, constrNo);
-                } else {
-                  LOGGER.trace(String.format("parsing linear combination %s", line));
-                  parseLinComb(line, curConstr, lineNo);
-                }
-              }
-              break;
-            case SEC_CONSTRAINTS:
-              {
-                if (keyword.equals("bounds") || keyword.equals("bound")) {
-                  if (constrComplete) {
-                    LOGGER.trace("switching to status SEC_BOUNDS");
-                    status = SEC_BOUNDS;
-                  } else {
-                    throw new ParseException("line " + lineNo + ": incomplete constraint", lineNo);
-                  }
-                } else {
-                  LOGGER.debug(String.format("parsing linear combination %s", line));
-                  constrComplete = parseLinComb(line, curConstr, lineNo);
-                  if (constrComplete) {
-                    LOGGER.trace("constraint is complete");
-                    if (constrHash.containsKey(curConstr.name)) {
-                      String addInfo = "'";
-                      if (curConstr.name.charAt(0) == 'c') {
-                        addInfo += " (maybe an earlier constraint got that name automatically)";
-                      }
-                      throw new ParseException(
-                          "line "
-                              + lineNo
-                              + ": ambiguous constraint name '"
-                              + curConstr.name
-                              + addInfo,
-                          lineNo);
-                    }
-                    LOGGER.trace(String.format("saving constraint %s", curConstr.name));
-                    constrHash.put(curConstr.name, curConstr);
-                    ++constrNo;
-                    LOGGER.trace("initialising new Constraint");
-                    curConstr = new Constraint("c" + constrNo, constrNo);
-                  }
-                }
-              }
-              break;
-            case SEC_BOUNDS:
-              {
-                LOGGER.trace("parsing bounds");
-                parseBound(line, lineNo);
-              }
-              break;
-          }
-        }
+  ImmutableList<Constraint> readConstraints(
+      final BufferedReader bufferedReader,
+      final MutableMap<String, VariableBuilder> variableBuilders)
+      throws IOException, InputException {
+    if (currentSection != Section.CONSTRAINTS) {
+      throw new InputException(String.format("Expected Section.CONSTRAINTS, found %s.", currentSection));
+    }
+    final MutableList<Constraint> constraints = ArrayListAdapter.newList();
+    ConstraintBuilder consBuilder = null;
+    while (true) {
+      var line = getTrimmedLine(bufferedReader);
+      final int colonIndex = line.indexOf(':');
+      if (line.equalsIgnoreCase("end")) {
+        LOGGER.debug("Switching to section {}.", Section.END);
+        currentSection = Section.END;
+        break;
+      } else if (line.equalsIgnoreCase("bounds")) {
+        LOGGER.debug("Switching to section {}.", Section.BOUNDS);
+        currentSection = Section.BOUNDS;
+        break;
+      } else if (colonIndex != -1) { // constraint name found
+        final var name = getName(line, 0, colonIndex, currentLine);
+        LOGGER.trace("Found constraint name: {}.", name);
+        consBuilder = new ConstraintBuilder().setName(name).setLineNumber(currentLine);
+        line = line.substring(colonIndex + 1).trim();
+      }
+      LOGGER.trace("Parsing line {}: {}", currentLine, line);
+      final var result = parseConstraintLine(line, variableBuilders);
+      if (consBuilder == null) {
+        throw new InputException("Constraint builder is null.");
+      }
+      if (result instanceof Unit) {
+        final var lhs = parseLinComb(variableBuilders, (String) result.getValue(0), currentLine);
+        consBuilder.mergeCoefficients(lhs);
+      }
+      else if (result instanceof Pair) {
+        consBuilder.setSense((ConstraintSense) result.getValue(0));
+        consBuilder.setRhs((Double) result.getValue(1));
+        constraints.add(consBuilder.build());
+        consBuilder = null;
+      }
+      else if (result instanceof Triplet) {
+        final var lhs = parseLinComb(variableBuilders, (String) result.getValue(0), currentLine);
+        consBuilder.mergeCoefficients(lhs);
+        consBuilder.setSense((ConstraintSense) result.getValue(1));
+        consBuilder.setRhs((Double) result.getValue(2));
+        constraints.add(consBuilder.build());
+        consBuilder = null;
+      } else {
+        throw new InputException("Unexpected constraint format.");
       }
     }
-    hash2arr();
+    return constraints.toImmutable();
   }
 
-  private void parseBound(String expr, int lineNo) throws ParseException {
-    String[] exprsplit = expr.split("\\<\\=");
-    switch (exprsplit.length) {
-      case 1:
-        {
-          exprsplit = expr.split("=");
-          if (exprsplit.length > 1) {
-            LOGGER.trace("..equality bound");
-            String varname = exprsplit[0].trim();
-            Variable var = (Variable) varHash.get(varname);
-            if (var == null) {
-              throw new ParseException(
-                  "line " + lineNo + ": unknown variable '" + varname + "'", lineNo);
-            }
-            String boundStr = exprsplit[1].trim();
-            double bound = 0;
-            try {
-              bound = Double.parseDouble(boundStr);
-            } catch (NumberFormatException ex) {
-              throw new ParseException(
-                  "line " + lineNo + ": '" + boundStr + "' is not a valid number", lineNo);
-            }
-            var.lb = bound;
-            var.ub = bound;
-          } else {
-            LOGGER.trace("..free variable");
-            exprsplit = expr.split("\\s");
-            if (exprsplit.length < 2) {
-              throw new ParseException(
-                  "line " + lineNo + ": illegal free variable expression", lineNo);
-            }
-            if (!exprsplit[1].trim().toLowerCase().equals("free")) {
-              throw new ParseException("line " + lineNo + ": expected 'free'", lineNo);
-            }
-            String varname = exprsplit[0].trim();
-            Variable var = (Variable) varHash.get(varname);
-            if (var == null) {
-              throw new ParseException(
-                  "line " + lineNo + ": unknown variable '" + varname + "'", lineNo);
-            }
-            var.lb = Double.NEGATIVE_INFINITY;
-            var.ub = Double.POSITIVE_INFINITY;
-          }
-        }
+  private void readBounds(final BufferedReader bufferedReader,
+      final MutableMap<String, VariableBuilder> variableBuilders) throws IOException, InputException {
+    if (currentSection != Section.BOUNDS) {
+      throw new InputException(String.format("Expected Section.BOUNDS, found %s.", currentSection));
+    }
+    while (true) {
+      final var line = getTrimmedLine(bufferedReader);
+      if (line.isBlank()) {
+        continue;
+      }
+      else if (line.equalsIgnoreCase("end")) {
+        LOGGER.debug("Switching to section {}.", Section.END);
+        currentSection = Section.END;
         break;
-      case 2:
-        {
-          LOGGER.trace("..one-sided bound");
-          String varname = exprsplit[0].trim();
-          String boundStr = exprsplit[1].trim();
-          int sense = SENSE_LEQ;
-          Variable var = (Variable) varHash.get(varname);
-          if (var == null) {
-            varname = exprsplit[1].trim();
-            boundStr = exprsplit[0].trim();
-            sense = SENSE_GEQ;
-            var = (Variable) varHash.get(varname);
-            if (var == null) {
-              throw new ParseException(
-                  String.format(
-                      "line %d: neither %s nor %s is a known variable", lineNo, boundStr, varname),
-                  lineNo);
-            }
-          }
-          double bound = 0;
-          try {
-            bound = Double.parseDouble(boundStr);
-          } catch (NumberFormatException ex) {
-            throw new ParseException(
-                String.format("line %d: %s is not a valid bound", lineNo, boundStr), lineNo);
-          }
-          switch (sense) {
-            case SENSE_LEQ:
-              LOGGER.trace("..upper");
-              var.ub = bound;
-              break;
-            case SENSE_GEQ:
-              LOGGER.trace("..lower");
-              var.lb = bound;
-              break;
-          }
-        }
-        break;
-      case 3:
-        {
-          LOGGER.trace("..two-sided bound");
-          String varname = exprsplit[1].trim();
-          Variable var = (Variable) varHash.get(varname);
-          if (var == null) {
-            throw new ParseException(
-                String.format("line %d: unknown variable %s", lineNo, varname), lineNo);
-          }
-          double lower = 0;
-          String lowerStr = exprsplit[0].trim().toLowerCase();
-          if (lowerStr.equals("-infinity") || lowerStr.equals("-inf")) {
-            lower = Double.NEGATIVE_INFINITY;
-          } else {
-            try {
-              lower = Double.parseDouble(lowerStr);
-            } catch (NumberFormatException ex) {
-              throw new ParseException(
-                  String.format("line %d: %s is not a valid bound", lineNo, lowerStr), lineNo);
-            }
-          }
-          double upper = 0;
-          String upperStr = exprsplit[2].trim().toLowerCase();
-          if (upperStr.equals("infinity")
-              || upperStr.equals("inf")
-              || upperStr.equals("+infinity")
-              || upperStr.equals("+inf")) {
-            upper = Double.POSITIVE_INFINITY;
-          } else {
-            try {
-              upper = Double.parseDouble(exprsplit[2].trim());
-            } catch (NumberFormatException ex) {
-              throw new ParseException(
-                  "line " + lineNo + ": '" + exprsplit[2].trim() + "' is not a valid bound",
-                  lineNo);
-            }
-          }
-          var.lb = lower;
-          var.ub = upper;
-        }
+      }
+      LOGGER.trace("Parsing line {}: {}", currentLine, line);
+      parseBound(line, variableBuilders);
     }
   }
 
-  private boolean parseLinComb(String expr, Constraint target, int lineNo) throws ParseException {
-    StringTokenizer exprtok = new StringTokenizer(expr, "+->=<", true);
-    boolean constrComplete = false;
-    int currSign = 1;
-    boolean inequflag = false;
-    while (exprtok.hasMoreTokens()) {
-      String nextToken = exprtok.nextToken().trim();
-      if (nextToken.length() > 0) {
-        if (nextToken.equals("+")) {
-          LOGGER.trace("..sign is +");
-          currSign = 1;
-        } else if (nextToken.equals("-")) {
-          LOGGER.trace("..sign is -");
-          currSign = -1;
-        } else if (nextToken.equals(">")) {
-          LOGGER.trace("..sense is >=");
-          target.sense = SENSE_GEQ;
-          inequflag = true;
-          currSign = 1;
-        } else if (nextToken.equals("<")) {
-          LOGGER.trace("..sense is <=");
-          target.sense = SENSE_LEQ;
-          inequflag = true;
-          currSign = 1;
-        } else if (nextToken.equals("=")) {
-          if (target.sense == SENSE_UNDEF) {
-            LOGGER.trace("..sense is =");
-            target.sense = SENSE_EQ;
-          } else if (!inequflag) {
-            throw new ParseException(String.format("line %d: illegal =", lineNo), lineNo);
-          }
-          currSign = 1;
+  private static double parseValue(final String expr, final int currentLine) {
+    if (expr.equalsIgnoreCase("inf") || expr.equalsIgnoreCase("infinity")
+        || expr.equalsIgnoreCase("+inf") || expr.equalsIgnoreCase("+infinity")) {
+      return Double.POSITIVE_INFINITY;
+    }
+    else if (expr.equalsIgnoreCase("-inf") || expr.equalsIgnoreCase("-infinity")) {
+      return Double.NEGATIVE_INFINITY;
+    }
+    else {
+      final double bound;
+      try {
+        bound = Double.parseDouble(expr);
+      }
+      catch (final NumberFormatException e) {
+        throw new InputException(String.format("Line %d: %s is not a valid number.", currentLine, expr));
+      }
+      return bound;
+    }
+  }
+
+  // throws if not found
+  private static VariableBuilder getVariableBuilder(final String name, final MutableMap<String, VariableBuilder> variableBuilders, final int currentLine) {
+    final var variable = variableBuilders.get(name);
+    if (variable == null) {
+      throw new InputException(String.format("Line %d: unknown variable name %s", currentLine, name));
+    }
+    return variable;
+  }
+
+  private void parseBound(final String line, final MutableMap<String, VariableBuilder> variableBuilders) {
+    var tokens = line.split("<=");
+    switch (tokens.length) {
+      case 1 -> { // var = bound || var free
+        tokens = line.split("=");
+        if (tokens.length > 1) {
+          LOGGER.trace("Parsing equality bound.");
+          final var variable = getVariableBuilder(tokens[0].trim(), variableBuilders, currentLine);
+          final var bound = parseValue(tokens[1].trim(), currentLine);
+          variable.setLb(bound);
+          variable.setUb(bound);
         } else {
-          if (currSign == 0) {
-            throw new ParseException(String.format("line %d: missing sign", lineNo), lineNo);
+          tokens = line.split("\s"); // split by whitespace character
+          if (tokens.length != 2 || !tokens[1].equalsIgnoreCase("free")) {
+            throw new InputException(String.format("Line %d: expected free variable expression, found %s.", currentLine, line));
           }
-          if ((target.sense == SENSE_GEQ)
-              || (target.sense == SENSE_EQ)
-              || (target.sense == SENSE_LEQ)) {
-            LOGGER.trace("..parsing rhs");
-            try {
-              target.rhs = Double.parseDouble(nextToken);
-            } catch (NumberFormatException ex) {
-              throw new ParseException(
-                  "line " + lineNo + ": '" + nextToken + "' is not a valid rhs entry", lineNo);
-            }
-            LOGGER.trace("..saving rhs in Constraint");
-            target.rhs *= currSign;
-            constrComplete = true;
-          } else {
-            LOGGER.trace("..parsing summand");
-            parseSummand(nextToken, target, lineNo, currSign);
-            currSign = 0;
-          }
+          final var variable = getVariableBuilder(tokens[0].trim(), variableBuilders, currentLine);
+          LOGGER.trace("Parsing free variable {}.", tokens[0].trim());
+          variable.setLb(Double.NEGATIVE_INFINITY);
+          variable.setUb(Double.POSITIVE_INFINITY);
         }
       }
+      case 2 -> { // var <= bound || bound <= var
+        var variable = variableBuilders.get(tokens[0].trim());
+        if (variable == null) {
+          LOGGER.trace("Parsing one-sided lower bound.");
+          variable = getVariableBuilder(tokens[1].trim(), variableBuilders, currentLine);
+          final var bound = parseValue(tokens[0].trim(), currentLine);
+          variable.setLb(bound);
+        }
+        else {
+          LOGGER.trace("Parsing one-sided upper bound.");
+          final var bound = parseValue(tokens[1].trim(), currentLine);
+          variable.setUb(bound);
+        }
+      }
+      case 3 -> { // lb <= var <= ub
+        final var variable = getVariableBuilder(tokens[1].trim(), variableBuilders, currentLine);
+        final var lb = parseValue(tokens[0].trim(), currentLine);
+        final var ub = parseValue(tokens[2].trim(), currentLine);
+        variable.setLb(lb);
+        variable.setUb(ub);
+      }
+      default ->
+        throw new InputException(String.format("Line %d: unknown bound format %s", currentLine, line));
     }
-
-    return constrComplete;
   }
 
-  private void parseSummand(String expr, Constraint target, int lineNo, int sign)
-      throws ParseException {
-    int si = summandSplitIndex(expr);
-    if (si == -1) {
-      throw new ParseException(
-          "line " + lineNo + ": '" + expr + "' is not a valid summand", lineNo);
+  /**
+   * Returns either Unit<String> or Pair<ConstraintSense, Double> or Triple<String, ConstraintSense, Double>
+   */
+  private Tuple parseConstraintLine(final String line, final MutableMap<String, VariableBuilder> variableBuilders) {
+    final var sensePattern = Pattern.compile("[><=]{1,2}");
+    final var senseMatcher = sensePattern.matcher(line);
+    if (senseMatcher.find()) { // lhs sense rhs || sense rhs
+      final var constraintSense = ConstraintSense.from(senseMatcher.group());
+      LOGGER.trace("Found constraint sense: {}", constraintSense.representation);
+      final var tokens = Arrays.stream(line.split(senseMatcher.group()))
+          .filter(s -> !s.isBlank())
+          .collect(Collectors.toUnmodifiableList());
+      if (tokens.size() == 1) { // sense rhs
+        final var rhs = parseValue(tokens.get(0), currentLine);
+        return new Pair<>(constraintSense, rhs);
+      }
+      else if (tokens.size() == 2) { // lhs sense rhs
+        final var rhs = parseValue(tokens.get(1), currentLine);
+        return new Triplet<>(tokens.get(0), constraintSense, rhs);
+      }
+      else {
+        throw new InputException(String.format("Line %d: invalid constraint line %s.", currentLine, line));
+      }
+    }
+    else { // only lhs
+      return new Unit<>(line.trim());
+    }
+  }
+
+  private static String getName(final String str, final int beginIndex, final int endIndex, final int currentLine) {
+    final String name = str.substring(beginIndex, endIndex).trim();
+    if (!name.matches(PATTERN)) {
+      throw new InputException(String.format("Line %d: invalid name %s.", currentLine, name));
+    }
+    return name;
+  }
+
+  /**
+   * Returns the next line without leading space, trailing space, and trailing comment and increases
+   * line counter
+   */
+  private String getTrimmedLine(final BufferedReader reader) throws IOException {
+    if (!reader.ready()) {
+      throw new InputException("Buffered reader is not ready.");
+    }
+    String line = reader.readLine();
+    ++currentLine;
+    final int commentBegin = line.indexOf('\\');
+    if (commentBegin != -1) {
+      line = line.substring(0, commentBegin);
+    }
+    return line.trim();
+  }
+
+  private static ImmutableMap<String, Double> parseLinComb(
+      final MutableMap<String, VariableBuilder> variableBuilders,
+      final String expr,
+      final int lineNo)
+      throws InputException {
+    final MutableMap<String, Double> linComb = new UnifiedMap<>();
+    final var exprTokens = new StringTokenizer(expr, "+-", true);
+    var sign = Sign.PLUS;
+    while (exprTokens.hasMoreTokens()) {
+      final String token = exprTokens.nextToken().trim();
+      if (token.isEmpty()) {
+        continue;
+      }
+      if (token.equals("+")) {
+        sign = Sign.PLUS;
+      } else if (token.equals("-")) {
+        sign = Sign.MINUS;
+      } else {
+        if (sign == Sign.UNDEF) {
+          throw new InputException(String.format("line %d: missing sign", lineNo));
+        }
+        LOGGER.trace("Parsing {} {}", sign, token);
+        parseAddend(variableBuilders, token, lineNo, sign, linComb);
+        sign = Sign.UNDEF;
+      }
+    }
+    return linComb.toImmutable();
+  }
+
+  private static void parseAddend(
+      final MutableMap<String, VariableBuilder> variableBuilders,
+      final String expr,
+      final int currentLine,
+      final Sign sign,
+      final MutableMap<String, Double> linComb)
+      throws InputException {
+    final int splitIndex = getSummandSplitIndex(expr);
+    if (splitIndex == -1) {
+      throw new InputException(String.format("Line %d: %s is not a valid addend.", currentLine, expr));
     }
     double coeff = 1;
-    if (si > 0) {
-      String coeffStr = expr.substring(0, si).trim();
-      try {
-        coeff = Double.parseDouble(coeffStr);
-      } catch (NumberFormatException ex) {
-        throw new ParseException(
-            "line " + lineNo + ": '" + coeffStr + "' is not a valid number", lineNo);
-      }
+    if (splitIndex > 0) {
+      final String coeffStr = expr.substring(0, splitIndex).trim();
+      coeff = parseValue(coeffStr, currentLine);
     }
-
-    String varStr = expr.substring(si).trim();
-    if (!varStr.matches(VARNAME_PATTERN)) {
-      throw new ParseException(
-          "line " + lineNo + ": '" + varStr + "' is not a valid variable name", lineNo);
+    final String name = getName(expr, splitIndex, expr.length(), currentLine);
+    final var variable = variableBuilders.get(name);
+    if (variable == null) {
+      final var varBuilder = new VariableBuilder().setName(name);
+      variableBuilders.put(name, varBuilder);
     }
-    Variable var = (Variable) varHash.get(varStr);
-    if (var == null) {
-      var = new Variable(varStr, varHash.size());
-      varHash.put(varStr, var);
-      target.coeff.put(varStr, new Coefficient(var.no, target.no, sign * coeff));
-    } else {
-      Coefficient co = (Coefficient) target.coeff.get(varStr);
-      if (co == null) {
-        target.coeff.put(varStr, new Coefficient(var.no, target.no, sign * coeff));
-      } else {
-        co.value += coeff;
-      }
-    }
+    LOGGER.trace("Found {} {}", sign.value * coeff, name);
+    linComb.merge(name, sign.value * coeff, Double::sum);
   }
 
-  private static int summandSplitIndex(String expr) {
+  private static int getSummandSplitIndex(final String expr) {
     boolean inExp = false;
     for (int i = 0; i < expr.length(); ++i) {
-      char c = expr.charAt(i);
+      final char c = expr.charAt(i);
       if (!(Character.isDigit(c) || (c == '.'))) {
         if ((c == 'e') || (c == 'E')) {
           if (inExp) {
@@ -626,52 +437,4 @@ public class LpFileReader {
     return -1;
   }
 
-  private void hash2arr() {
-    int noOfConstr = constrHash.size();
-    int noOfVar = varHash.size();
-
-    LOGGER.debug(String.format("%d constraints, %d variables", noOfConstr, noOfVar));
-    constraint = new double[noOfConstr][noOfVar];
-    for (int i = 0; i < noOfConstr; ++i) {
-      for (int j = 0; j < noOfVar; ++j) {
-        constraint[i][j] = 0;
-      }
-    }
-    sense = new int[noOfConstr];
-    rhs = new double[noOfConstr];
-    constrName = new String[noOfConstr];
-    obj = new double[noOfVar];
-    for (int j = 0; j < noOfVar; ++j) {
-      obj[j] = 0;
-    }
-    objsense = objRaw.sense;
-    lbound = new double[noOfVar];
-    ubound = new double[noOfVar];
-    varName = new String[noOfVar];
-
-    for (Iterator objCoeffIt = objRaw.coeff.values().iterator(); objCoeffIt.hasNext(); ) {
-      Coefficient coeff = (Coefficient) objCoeffIt.next();
-      obj[coeff.varNo] = coeff.value;
-    }
-
-    for (Iterator constrIt = constrHash.values().iterator(); constrIt.hasNext(); ) {
-      Constraint curConstr = (Constraint) constrIt.next();
-      int i = curConstr.no;
-      sense[i] = curConstr.sense;
-      rhs[i] = curConstr.rhs;
-      constrName[i] = curConstr.name;
-      for (Iterator coeffIt = curConstr.coeff.values().iterator(); coeffIt.hasNext(); ) {
-        Coefficient coeff = (Coefficient) coeffIt.next();
-        constraint[i][coeff.varNo] = coeff.value;
-      }
-    }
-
-    for (Iterator varIt = varHash.values().iterator(); varIt.hasNext(); ) {
-      Variable curVar = (Variable) varIt.next();
-      int j = curVar.no;
-      lbound[j] = curVar.lb;
-      ubound[j] = curVar.ub;
-      varName[j] = curVar.name;
-    }
-  }
 }

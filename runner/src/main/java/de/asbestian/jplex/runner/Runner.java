@@ -9,14 +9,9 @@ public class Runner {
 
   private static final Logger LOGGER = LoggerFactory.getLogger(Runner.class);
 
-  public static void main(String... args) {
-    final LpFileReader lpFileReader = new LpFileReader(args[0]);
-    try {
-      lpFileReader.readLP();
-    } catch (Exception e) {
-      LOGGER.warn(e.getMessage());
-    }
-    LOGGER.info(String.format("Number of variables: %d", lpFileReader.noOfVariables()));
-    LOGGER.info(String.format("Number of constraints: %d", lpFileReader.noOfConstraints()));
+  public static void main(final String... args) {
+    final var reader = new LpFileReader(args[0]);
+    LOGGER.info("Number of variables: {}", reader.getNumberOfVariables());
+    LOGGER.info("Number of constraints: {}", reader.getNumberOfConstraints());
   }
 }
