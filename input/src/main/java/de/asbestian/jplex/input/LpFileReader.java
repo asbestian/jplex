@@ -8,22 +8,16 @@ import java.io.BufferedReader;
 import java.io.FileReader;
 import java.io.IOException;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.StringTokenizer;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import org.eclipse.collections.api.factory.Lists;
+import org.eclipse.collections.api.factory.Maps;
 import org.eclipse.collections.api.list.ImmutableList;
 import org.eclipse.collections.api.list.MutableList;
 import org.eclipse.collections.api.map.ImmutableMap;
 import org.eclipse.collections.api.map.MutableMap;
-import org.eclipse.collections.impl.list.mutable.ArrayListAdapter;
-import org.eclipse.collections.impl.list.mutable.FastList;
-import org.eclipse.collections.impl.map.immutable.ImmutableUnifiedMap;
 import org.eclipse.collections.impl.map.mutable.UnifiedMap;
-import org.javatuples.Pair;
-import org.javatuples.Triplet;
-import org.javatuples.Tuple;
-import org.javatuples.Unit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -56,6 +50,13 @@ public class LpFileReader {
     final int value;
   }
 
+  private sealed interface ParsedConstraintLine permits Unit, Pair, Triple {}
+  private static record Unit(String line) implements ParsedConstraintLine {}
+  private static record Pair(ConstraintSense sense, Double rhs) implements ParsedConstraintLine {}
+  private static record Triple(String line, ConstraintSense sense, Double rhs) implements
+      ParsedConstraintLine {}
+
+
   private static final String PATTERN =
       "[a-zA-Z\\!\"#\\$%&\\(\\)/,;\\?`'\\{\\}\\|~_][a-zA-Z0-9\\!\"#\\$%&\\(\\)/,\\.;\\?`'\\{\\}\\|~_]*";
 
@@ -79,10 +80,9 @@ public class LpFileReader {
     } catch (final IOException | InputException e) {
       LOGGER.error("Problem reading section {} in input file {}", currentSection, path);
       LOGGER.error(e.getMessage());
-      objective = new Objective("", OBJECTIVE_SENSE.UNDEF, new ImmutableUnifiedMap<>(
-          Collections.emptyMap()));
-      constraints = new FastList<Constraint>().toImmutable();
-      variables = new ImmutableUnifiedMap<>(Collections.emptyMap());
+      objective = new Objective("", OBJECTIVE_SENSE.UNDEF, Maps.immutable.empty());
+      constraints = Lists.immutable.empty();
+      variables = Maps.immutable.empty();
     }
   }
 
@@ -164,7 +164,7 @@ public class LpFileReader {
     if (currentSection != Section.CONSTRAINTS) {
       throw new InputException(String.format("Expected Section.CONSTRAINTS, found %s.", currentSection));
     }
-    final MutableList<Constraint> constraints = ArrayListAdapter.newList();
+    final MutableList<Constraint> constraints = Lists.mutable.empty();
     ConstraintBuilder consBuilder = null;
     while (true) {
       var line = getTrimmedLine(bufferedReader);
@@ -188,25 +188,25 @@ public class LpFileReader {
       if (consBuilder == null) {
         throw new InputException("Constraint builder is null.");
       }
-      if (result instanceof Unit) {
-        final var lhs = parseLinComb(variableBuilders, (String) result.getValue(0), currentLine);
+      switch (result) {
+        case Unit unit -> {
+          final var lhs = parseLinComb(variableBuilders, unit.line(), currentLine);
+          consBuilder.mergeCoefficients(lhs);
+        }
+        case Pair pair -> {
+          consBuilder.setSense(pair.sense);
+          consBuilder.setRhs(pair.rhs);
+          constraints.add(consBuilder.build());
+          consBuilder = null;
+        }
+        case Triple triple -> {
+        final var lhs = parseLinComb(variableBuilders, triple.line(), currentLine);
         consBuilder.mergeCoefficients(lhs);
-      }
-      else if (result instanceof Pair) {
-        consBuilder.setSense((ConstraintSense) result.getValue(0));
-        consBuilder.setRhs((Double) result.getValue(1));
+        consBuilder.setSense(triple.sense);
+        consBuilder.setRhs(triple.rhs);
         constraints.add(consBuilder.build());
         consBuilder = null;
-      }
-      else if (result instanceof Triplet) {
-        final var lhs = parseLinComb(variableBuilders, (String) result.getValue(0), currentLine);
-        consBuilder.mergeCoefficients(lhs);
-        consBuilder.setSense((ConstraintSense) result.getValue(1));
-        consBuilder.setRhs((Double) result.getValue(2));
-        constraints.add(consBuilder.build());
-        consBuilder = null;
-      } else {
-        throw new InputException("Unexpected constraint format.");
+        }
       }
     }
     return constraints.toImmutable();
@@ -309,32 +309,28 @@ public class LpFileReader {
     }
   }
 
-  /**
-   * Returns either Unit<String> or Pair<ConstraintSense, Double> or Triple<String, ConstraintSense, Double>
-   */
-  private Tuple parseConstraintLine(final String line, final MutableMap<String, VariableBuilder> variableBuilders) {
+   private ParsedConstraintLine parseConstraintLine(final String line, final MutableMap<String, VariableBuilder> variableBuilders) {
     final var sensePattern = Pattern.compile("[><=]{1,2}");
     final var senseMatcher = sensePattern.matcher(line);
     if (senseMatcher.find()) { // lhs sense rhs || sense rhs
       final var constraintSense = ConstraintSense.from(senseMatcher.group());
       LOGGER.trace("Found constraint sense: {}", constraintSense.representation);
       final var tokens = Arrays.stream(line.split(senseMatcher.group()))
-          .filter(s -> !s.isBlank())
-          .collect(Collectors.toUnmodifiableList());
+          .filter(s -> !s.isBlank()).toList();
       if (tokens.size() == 1) { // sense rhs
         final var rhs = parseValue(tokens.get(0), currentLine);
-        return new Pair<>(constraintSense, rhs);
+        return new Pair(constraintSense, rhs);
       }
       else if (tokens.size() == 2) { // lhs sense rhs
         final var rhs = parseValue(tokens.get(1), currentLine);
-        return new Triplet<>(tokens.get(0), constraintSense, rhs);
+        return new Triple(tokens.get(0), constraintSense, rhs);
       }
       else {
         throw new InputException(String.format("Line %d: invalid constraint line %s.", currentLine, line));
       }
     }
     else { // only lhs
-      return new Unit<>(line.trim());
+      return new Unit(line.trim());
     }
   }
 

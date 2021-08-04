@@ -19,8 +19,8 @@
 
   <properties>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    <maven.compiler.source>16</maven.compiler.source>
-    <maven.compiler.target>16</maven.compiler.target>
+    <maven.compiler.source>17</maven.compiler.source>
+    <maven.compiler.target>17</maven.compiler.target>
     <argLine>--enable-preview</argLine>
   </properties>
 
@@ -52,12 +52,6 @@
       <artifactId>eclipse-collections</artifactId>
       <version>10.4.0</version>
     </dependency>
-    <dependency>
-      <groupId>org.javatuples</groupId>
-      <artifactId>javatuples</artifactId>
-      <version>1.2</version>
-      <scope>compile</scope>
-    </dependency>
   </dependencies>
 
   <build>
@@ -78,7 +72,7 @@
           <artifactId>maven-compiler-plugin</artifactId>
           <version>3.8.1</version>
           <configuration>
-            <release>16</release>
+            <release>17</release>
             <compilerArgs>--enable-preview</compilerArgs>
           </configuration>
         </plugin>
