@@ -2,15 +2,17 @@ package de.asbestian.jplex.input;
 
 import de.asbestian.jplex.input.Constraint.ConstraintBuilder;
 import de.asbestian.jplex.input.Constraint.ConstraintSense;
-import de.asbestian.jplex.input.Objective.OBJECTIVE_SENSE;
+import de.asbestian.jplex.input.Objective.ObjectiveBuilder;
+import de.asbestian.jplex.input.Objective.ObjectiveSense;
 import de.asbestian.jplex.input.Variable.VariableBuilder;
 import java.io.BufferedReader;
 import java.io.FileReader;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.StringTokenizer;
+import java.util.function.Predicate;
 import java.util.regex.Pattern;
-import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import org.eclipse.collections.api.factory.Lists;
 import org.eclipse.collections.api.factory.Maps;
 import org.eclipse.collections.api.list.ImmutableList;
@@ -31,11 +33,24 @@ public class LpFileReader {
   private static final Logger LOGGER = LoggerFactory.getLogger(LpFileReader.class);
 
   private enum Section {
-    START,
-    OBJECTIVE,
-    CONSTRAINTS,
-    BOUNDS,
-    END
+    START(Lists.immutable.empty()),
+    OBJECTIVE(Lists.immutable.empty()),
+    CONSTRAINTS(Lists.immutable.of("subject to", "such that", "s.t.", "st.", "st")),
+    BOUNDS(Lists.immutable.of("bounds", "bound")),
+    BINARY(Lists.immutable.of("binary", "binaries", "bin")),
+    GENERAL(Lists.immutable.of("generals", "general", "gen")),
+    END(Lists.immutable.of("end"));
+
+    Stream<String> rep() {
+      return this.representation.stream();
+    }
+
+    Section(final ImmutableList<String> values) {
+      this.representation = values;
+    }
+
+    private final ImmutableList<String> representation;
+
   }
 
   private enum Sign {
@@ -56,141 +71,145 @@ public class LpFileReader {
   private static record Triple(String line, ConstraintSense sense, Double rhs) implements
       ParsedConstraintLine {}
 
-
   private static final String PATTERN =
       "[a-zA-Z\\!\"#\\$%&\\(\\)/,;\\?`'\\{\\}\\|~_][a-zA-Z0-9\\!\"#\\$%&\\(\\)/,\\.;\\?`'\\{\\}\\|~_]*";
 
-  private Objective objective;
+  private ImmutableList<Objective> objectives;
   private ImmutableList<Constraint> constraints;
   private ImmutableMap<String, Variable> variables;
   private Section currentSection;
-  private int currentLine;
+  private int currentLineNumber;
 
   public LpFileReader(final String path) {
-    currentSection = Section.START;
-    currentLine = 0;
+    this.currentSection = Section.START;
+    this.currentLineNumber = 0;
     final MutableMap<String, VariableBuilder> variableBuilders = new UnifiedMap<>();
     try (final BufferedReader bf = new BufferedReader(new FileReader(path))) {
-      objective = readObjective(bf, variableBuilders);
-      constraints = readConstraints(bf, variableBuilders);
-      if (currentSection == Section.BOUNDS) {
+      final var objectiveSense = readObjectiveSense(bf);
+      this.objectives = readObjectives(bf, variableBuilders, objectiveSense);
+      this.constraints = readConstraints(bf, variableBuilders);
+      if (this.currentSection == Section.BOUNDS) {
         readBounds(bf, variableBuilders);
       }
-      variables = variableBuilders.collectValues((key, value) -> value.build()).toImmutable();
+      this.variables = variableBuilders.collectValues((key, value) -> value.build()).toImmutable();
     } catch (final IOException | InputException e) {
-      LOGGER.error("Problem reading section {} in input file {}", currentSection, path);
+      LOGGER.error("Problem reading section {} in input file {}", this.currentSection, path);
       LOGGER.error(e.getMessage());
-      objective = new Objective("", OBJECTIVE_SENSE.UNDEF, Maps.immutable.empty());
-      constraints = Lists.immutable.empty();
-      variables = Maps.immutable.empty();
+      this.objectives = Lists.immutable.empty();
+      this.constraints = Lists.immutable.empty();
+      this.variables = Maps.immutable.empty();
     }
-  }
-
-  public Objective getObjective() {
-    return objective;
   }
 
   public int getNumberOfVariables() {
-    return variables.size();
+    return this.variables.size();
   }
 
   public int getNumberOfConstraints() {
-    return constraints.size();
+    return this.constraints.size();
   }
 
-  private Objective readObjective(
-      final BufferedReader bufferedReader,
-      final MutableMap<String, VariableBuilder> variableBuilders)
-      throws IOException, InputException {
-    if (currentSection != Section.START) {
-      throw new InputException(String.format("Expected Section.START, found %s.", currentSection));
+  private ObjectiveSense readObjectiveSense(final BufferedReader bufferedReader) throws IOException, InputException {
+    if (this.currentSection != Section.START) {
+      throw new InputException(String.format("Expected Section.START, found %s.",
+          this.currentSection));
     }
-    OBJECTIVE_SENSE sense = null;
-    // read optimisation direction
-    var optDirectionRead = false;
-    while (!optDirectionRead) {
-      final var line = getTrimmedLine(bufferedReader);
-      if (line.isBlank()) {
-        continue;
-      }
-      LOGGER.debug("Switching to section {}.", Section.OBJECTIVE);
-      currentSection = Section.OBJECTIVE;
-      if (line.equalsIgnoreCase("max") || line.equalsIgnoreCase("maximize")
-          || line.equalsIgnoreCase("maximise")) {
+    final var line = getNextProperLine(bufferedReader);
+    final var isMax = ObjectiveSense.MAX.rep().anyMatch(line::equalsIgnoreCase);
+    final var isMin = ObjectiveSense.MIN.rep().anyMatch(line::equalsIgnoreCase);
+    if (isMax || isMin) {
+      this.currentSection = Section.OBJECTIVE;
+      LOGGER.debug("Switching to section {}.", this.currentSection);
+      if (isMax) {
         LOGGER.debug("Found maximisation direction.");
-        sense = OBJECTIVE_SENSE.MAX;
-      } else if (line.equalsIgnoreCase("min")
-          || line.equalsIgnoreCase("minimize")
-           || line.equalsIgnoreCase("minimise")) {
-        LOGGER.debug("Found minimisation direction.");
-        sense = OBJECTIVE_SENSE.MIN;
+        return ObjectiveSense.MAX;
       } else {
-        throw new InputException(
-            String.format("Line %d: unrecognised optimisation direction %s.", currentLine, line));
+        LOGGER.debug("Found minimisation direction.");
+        return ObjectiveSense.MIN;
       }
-      optDirectionRead = true;
     }
-    // read objective name and objective expression
-    String objName = "";
-    final MutableMap<String, Double> coefficients = new UnifiedMap<>();
-    while (true) {
-      var line = getTrimmedLine(bufferedReader);
+    else {
+      throw new InputException(
+          String.format("Line %d: unrecognised optimisation direction %s.", this.currentLineNumber, line));
+    }
+  }
+
+  private ImmutableList<Objective> readObjectives(
+      final BufferedReader bufferedReader,
+      final MutableMap<String, VariableBuilder> variableBuilders,
+      final ObjectiveSense objectiveSense)
+      throws IOException, InputException {
+    if (this.currentSection != Section.OBJECTIVE) {
+      throw new InputException(String.format("Expected Section.OBJECTIVE, found %s.",
+          this.currentSection));
+    }
+    final MutableList<ObjectiveBuilder> builders = Lists.mutable.empty();
+    final Predicate<String> isConstraintSection = line -> Section.CONSTRAINTS.rep().anyMatch(line::equalsIgnoreCase);
+    String line = getNextProperLine(bufferedReader);
+    while(!isConstraintSection.test(line)) {
       final int colonIndex = line.indexOf(':');
-      if (line.equalsIgnoreCase("subject to")
-          || line.equalsIgnoreCase("such that")
-          || line.equalsIgnoreCase("s.t.")
-          || line.equalsIgnoreCase("st.")
-          || line.equalsIgnoreCase("st")) {
-        LOGGER.debug("Switching to section {}.", Section.CONSTRAINTS);
-        currentSection = Section.CONSTRAINTS;
-        break;
-      } else if (colonIndex != -1) { // parsing objective name
-        objName = getName(line, 0, colonIndex, currentLine);
-        LOGGER.trace("Found objective name: {}.", objName);
+      if (colonIndex != -1) { // objective function name found; add new builder
+        final var name = getName(line, 0, colonIndex, this.currentLineNumber);
+        LOGGER.trace("Found objective name: {}.", name);
+        final var builder = new ObjectiveBuilder().setSense(objectiveSense).setName(name);
+        builders.add(builder);
         line = line.substring(colonIndex + 1).trim();
       }
       // parse objective expression
-      LOGGER.trace("Parsing line {}: {}", currentLine, line);
-      final var linComb = parseLinComb(variableBuilders, line, currentLine);
-      linComb.forEachKeyValue((key, value) -> coefficients.merge(key, value, Double::sum));
+      LOGGER.trace("Parsing line {}: {}", this.currentLineNumber, line);
+      final var linComb = parseLinComb(variableBuilders, line, this.currentLineNumber);
+      builders.getLast().mergeCoefficients(linComb);
+      line = getNextProperLine(bufferedReader);
     }
-    return new Objective(objName, sense, coefficients.toImmutable());
+    this.currentSection = Section.CONSTRAINTS;
+    LOGGER.debug("Switching to section {}.", this.currentSection);
+    return builders.collect(ObjectiveBuilder::build).toImmutable();
   }
 
   ImmutableList<Constraint> readConstraints(
       final BufferedReader bufferedReader,
       final MutableMap<String, VariableBuilder> variableBuilders)
       throws IOException, InputException {
-    if (currentSection != Section.CONSTRAINTS) {
-      throw new InputException(String.format("Expected Section.CONSTRAINTS, found %s.", currentSection));
+    if (this.currentSection != Section.CONSTRAINTS) {
+      throw new InputException(String.format("Expected Section.CONSTRAINTS, found %s.",
+          this.currentSection));
     }
     final MutableList<Constraint> constraints = Lists.mutable.empty();
     ConstraintBuilder consBuilder = null;
     while (true) {
       var line = getTrimmedLine(bufferedReader);
       final int colonIndex = line.indexOf(':');
-      if (line.equalsIgnoreCase("end")) {
-        LOGGER.debug("Switching to section {}.", Section.END);
-        currentSection = Section.END;
+      if (Section.END.rep().anyMatch(line::equalsIgnoreCase)) {
+        this.currentSection = Section.END;
+        LOGGER.debug("Switching to section {}.", this.currentSection);
         break;
-      } else if (line.equalsIgnoreCase("bounds")) {
-        LOGGER.debug("Switching to section {}.", Section.BOUNDS);
-        currentSection = Section.BOUNDS;
+      } else if (Section.BOUNDS.rep().anyMatch(line::equalsIgnoreCase)) {
+        this.currentSection = Section.BOUNDS;
+        LOGGER.debug("Switching to section {}.", this.currentSection);
         break;
-      } else if (colonIndex != -1) { // constraint name found
-        final var name = getName(line, 0, colonIndex, currentLine);
-        LOGGER.trace("Found constraint name: {}.", name);
-        consBuilder = new ConstraintBuilder().setName(name).setLineNumber(currentLine);
-        line = line.substring(colonIndex + 1).trim();
+      } else if (Section.GENERAL.rep().anyMatch(line::equalsIgnoreCase)) {
+        this.currentSection = Section.GENERAL;
+        LOGGER.debug("Switching to section {}.", this.currentSection);
+        break;
+      } else if (Section.BINARY.rep().anyMatch(line::equalsIgnoreCase)) {
+        this.currentSection = Section.BINARY;
+        LOGGER.debug("Switching to section {}.", this.currentSection);
+        break;
       }
-      LOGGER.trace("Parsing line {}: {}", currentLine, line);
+      else if (colonIndex != -1) { // constraint name found
+          final var name = getName(line, 0, colonIndex, this.currentLineNumber);
+          LOGGER.trace("Found constraint name: {}.", name);
+          consBuilder = new ConstraintBuilder().setName(name).setLineNumber(this.currentLineNumber);
+          line = line.substring(colonIndex + 1).trim();
+      }
+      LOGGER.trace("Parsing line {}: {}", this.currentLineNumber, line);
       final var result = parseConstraintLine(line, variableBuilders);
       if (consBuilder == null) {
         throw new InputException("Constraint builder is null.");
       }
       switch (result) {
         case Unit unit -> {
-          final var lhs = parseLinComb(variableBuilders, unit.line(), currentLine);
+          final var lhs = parseLinComb(variableBuilders, unit.line(), this.currentLineNumber);
           consBuilder.mergeCoefficients(lhs);
         }
         case Pair pair -> {
@@ -200,22 +219,23 @@ public class LpFileReader {
           consBuilder = null;
         }
         case Triple triple -> {
-        final var lhs = parseLinComb(variableBuilders, triple.line(), currentLine);
-        consBuilder.mergeCoefficients(lhs);
-        consBuilder.setSense(triple.sense);
-        consBuilder.setRhs(triple.rhs);
-        constraints.add(consBuilder.build());
-        consBuilder = null;
+          final var lhs = parseLinComb(variableBuilders, triple.line(), this.currentLineNumber);
+          consBuilder.mergeCoefficients(lhs);
+          consBuilder.setSense(triple.sense);
+          consBuilder.setRhs(triple.rhs);
+          constraints.add(consBuilder.build());
+          consBuilder = null;
         }
       }
     }
-    return constraints.toImmutable();
-  }
+   return constraints.toImmutable();
+}
 
   private void readBounds(final BufferedReader bufferedReader,
       final MutableMap<String, VariableBuilder> variableBuilders) throws IOException, InputException {
-    if (currentSection != Section.BOUNDS) {
-      throw new InputException(String.format("Expected Section.BOUNDS, found %s.", currentSection));
+    if (this.currentSection != Section.BOUNDS) {
+      throw new InputException(String.format("Expected Section.BOUNDS, found %s.",
+          this.currentSection));
     }
     while (true) {
       final var line = getTrimmedLine(bufferedReader);
@@ -224,10 +244,10 @@ public class LpFileReader {
       }
       else if (line.equalsIgnoreCase("end")) {
         LOGGER.debug("Switching to section {}.", Section.END);
-        currentSection = Section.END;
+        this.currentSection = Section.END;
         break;
       }
-      LOGGER.trace("Parsing line {}: {}", currentLine, line);
+      LOGGER.trace("Parsing line {}: {}", this.currentLineNumber, line);
       parseBound(line, variableBuilders);
     }
   }
@@ -268,16 +288,19 @@ public class LpFileReader {
         tokens = line.split("=");
         if (tokens.length > 1) {
           LOGGER.trace("Parsing equality bound.");
-          final var variable = getVariableBuilder(tokens[0].trim(), variableBuilders, currentLine);
-          final var bound = parseValue(tokens[1].trim(), currentLine);
+          final var variable = getVariableBuilder(tokens[0].trim(), variableBuilders,
+              this.currentLineNumber);
+          final var bound = parseValue(tokens[1].trim(), this.currentLineNumber);
           variable.setLb(bound);
           variable.setUb(bound);
         } else {
           tokens = line.split("\s"); // split by whitespace character
           if (tokens.length != 2 || !tokens[1].equalsIgnoreCase("free")) {
-            throw new InputException(String.format("Line %d: expected free variable expression, found %s.", currentLine, line));
+            throw new InputException(String.format("Line %d: expected free variable expression, found %s.",
+                this.currentLineNumber, line));
           }
-          final var variable = getVariableBuilder(tokens[0].trim(), variableBuilders, currentLine);
+          final var variable = getVariableBuilder(tokens[0].trim(), variableBuilders,
+              this.currentLineNumber);
           LOGGER.trace("Parsing free variable {}.", tokens[0].trim());
           variable.setLb(Double.NEGATIVE_INFINITY);
           variable.setUb(Double.POSITIVE_INFINITY);
@@ -287,25 +310,26 @@ public class LpFileReader {
         var variable = variableBuilders.get(tokens[0].trim());
         if (variable == null) {
           LOGGER.trace("Parsing one-sided lower bound.");
-          variable = getVariableBuilder(tokens[1].trim(), variableBuilders, currentLine);
-          final var bound = parseValue(tokens[0].trim(), currentLine);
+          variable = getVariableBuilder(tokens[1].trim(), variableBuilders, this.currentLineNumber);
+          final var bound = parseValue(tokens[0].trim(), this.currentLineNumber);
           variable.setLb(bound);
         }
         else {
           LOGGER.trace("Parsing one-sided upper bound.");
-          final var bound = parseValue(tokens[1].trim(), currentLine);
+          final var bound = parseValue(tokens[1].trim(), this.currentLineNumber);
           variable.setUb(bound);
         }
       }
       case 3 -> { // lb <= var <= ub
-        final var variable = getVariableBuilder(tokens[1].trim(), variableBuilders, currentLine);
-        final var lb = parseValue(tokens[0].trim(), currentLine);
-        final var ub = parseValue(tokens[2].trim(), currentLine);
+        final var variable = getVariableBuilder(tokens[1].trim(), variableBuilders,
+            this.currentLineNumber);
+        final var lb = parseValue(tokens[0].trim(), this.currentLineNumber);
+        final var ub = parseValue(tokens[2].trim(), this.currentLineNumber);
         variable.setLb(lb);
         variable.setUb(ub);
       }
       default ->
-        throw new InputException(String.format("Line %d: unknown bound format %s", currentLine, line));
+        throw new InputException(String.format("Line %d: unknown bound format %s", this.currentLineNumber, line));
     }
   }
 
@@ -318,15 +342,16 @@ public class LpFileReader {
       final var tokens = Arrays.stream(line.split(senseMatcher.group()))
           .filter(s -> !s.isBlank()).toList();
       if (tokens.size() == 1) { // sense rhs
-        final var rhs = parseValue(tokens.get(0), currentLine);
+        final var rhs = parseValue(tokens.get(0), this.currentLineNumber);
         return new Pair(constraintSense, rhs);
       }
       else if (tokens.size() == 2) { // lhs sense rhs
-        final var rhs = parseValue(tokens.get(1), currentLine);
+        final var rhs = parseValue(tokens.get(1), this.currentLineNumber);
         return new Triple(tokens.get(0), constraintSense, rhs);
       }
       else {
-        throw new InputException(String.format("Line %d: invalid constraint line %s.", currentLine, line));
+        throw new InputException(String.format("Line %d: invalid constraint line %s.",
+            this.currentLineNumber, line));
       }
     }
     else { // only lhs
@@ -343,6 +368,25 @@ public class LpFileReader {
   }
 
   /**
+   * Returns the next non-blank line stripped of any white space and comment.
+   */
+  private String getNextProperLine(final BufferedReader reader) throws IOException {
+    String line;
+    do {
+      if (!reader.ready()) {
+        throw new InputException("Buffered reader is not ready.");
+      }
+      line = reader.readLine();
+      ++this.currentLineNumber;
+      final int commentBegin = line.indexOf('\\');
+      if (commentBegin != -1) {
+        line = line.substring(0, commentBegin);
+      }
+    } while (line.isBlank());
+    return line.strip();
+  }
+
+  /**
    * Returns the next line without leading space, trailing space, and trailing comment and increases
    * line counter
    */
@@ -351,7 +395,7 @@ public class LpFileReader {
       throw new InputException("Buffered reader is not ready.");
     }
     String line = reader.readLine();
-    ++currentLine;
+    ++this.currentLineNumber;
     final int commentBegin = line.indexOf('\\');
     if (commentBegin != -1) {
       line = line.substring(0, commentBegin);
