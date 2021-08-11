@@ -1,7 +1,9 @@
 \Problem name: afiro.mps
 
 Minimize
- COST: - 0.4 X02 - 0.32 X14 - 0.6 X23 - 0.48 X36 + 10 X39
+ OBJ1: - 0.4 X02 - 0.32 X14 - 0.6 X23 - 0.48 X36 + 10 X39
+ OBJ2: X03 + 2.5 X06 - 5 X08
+ OBJ3: -10.4 X03 - 2.5 X07 + 2.1 X10
 Subject To
  R09: - X01 + X02 + X03  = 0
  R10: - 1.06 X01 + X04  = 0

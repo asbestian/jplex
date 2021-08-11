@@ -28,7 +28,6 @@ import org.slf4j.LoggerFactory;
 
 /**
  * This class is responsible for reading input files given in lp format.
- * Note that the parser cannot yet handle integer and binary variables.
  *
  * @author Sebastian Schenker */
 public class LpFileReader {
