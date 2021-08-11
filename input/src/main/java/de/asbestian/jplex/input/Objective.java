@@ -19,11 +19,11 @@ public record Objective(String name, ObjectiveSense sense, ImmutableMap<String, 
     UNDEF(Lists.immutable.empty());
 
     Stream<String> rep() {
-      return this.representation.stream();
+      return representation.stream();
     }
 
     ObjectiveSense(final ImmutableList<String> values) {
-      this.representation = values;
+      representation = values;
     }
 
     private final ImmutableList<String> representation;
@@ -38,28 +38,32 @@ public record Objective(String name, ObjectiveSense sense, ImmutableMap<String, 
     // no check on coefficient map in order to allow zero objective
   }
 
+  public double getCoeff(final Variable var) {
+    return coefficients.get(var.name());
+  }
+
   public static final class ObjectiveBuilder {
     private String name = null;
     private ObjectiveSense sense = null;
     private final MutableMap<String, Double> coefficients = new UnifiedMap<>();
 
     public ObjectiveBuilder setName(final String value) {
-      this.name = value;
+      name = value;
       return this;
     }
 
     public ObjectiveBuilder setSense(final ObjectiveSense value) {
-      this.sense = value;
+      sense = value;
       return this;
     }
 
     public ObjectiveBuilder mergeCoefficients(final ImmutableMap<String, Double> map) {
-      map.forEachKeyValue((key, value) -> this.coefficients.merge(key, value, Double::sum));
+      map.forEachKeyValue((key, value) -> coefficients.merge(key, value, Double::sum));
       return this;
     }
 
     public Objective build() {
-      return new Objective(this.name, this.sense, this.coefficients.toImmutable());
+      return new Objective(name, sense, coefficients.toImmutable());
     }
 
   }
